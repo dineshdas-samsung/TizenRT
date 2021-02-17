@@ -1,0 +1,3 @@
+config ENTRY_FS_PERFORMANCE
+	bool "Filesystem Performance Test Example"
+	depends on EXAMPLES_FS_PERFORMANCE
