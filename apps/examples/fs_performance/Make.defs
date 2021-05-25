@@ -54,3 +54,4 @@
 ifeq ($(CONFIG_EXAMPLES_FS_PERFORMANCE),y)
 CONFIGURED_APPS += examples/fs_performance
 endif
+

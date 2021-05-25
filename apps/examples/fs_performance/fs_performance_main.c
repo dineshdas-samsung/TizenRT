@@ -49,6 +49,10 @@
  * POSSIBILITY OF SUCH DAMAGE.
  *
  ****************************************************************************/
+/***************************************************************************
+ * This code is just meant for file system performance test purpose. 
+ * Stil testing in progress
+***************************************************************************/
 
 /****************************************************************************
  * Included Files
@@ -66,10 +70,10 @@
  * Pre Processor Definitions
  ****************************************************************************/
 
-#define BUFFER_SIZE_S			1800
 #define SAMPLE_FILE 			"/mnt/sample_file"
 #define SINGLE_TEST_FILE_DIR		"/mnt/single"
 #define SINGLE_TEST_FILE		"/mnt/single/test_file"
+#define SINGLE_TEST_FILE2               "/mnt/single/test_file2.txt"
 #define MULTI_TEST_FILE_DIR 		"/mnt/multiple"
 #define MULTI_TEST_FILE 		"/mnt/multiple/test_file_"
 #define TEST_FLAG_SINGLE_WRITE_APP 	1
@@ -81,6 +85,8 @@
 #define TEST_FLAG_MULTIPLE_READ_SEQ 	7
 #define TEST_FLAG_MULTIPLE_READ_OVE 	8
 #define TEST_FLAG_SINGLE_WRITE_MIX 	9
+#define TEST_FLAG_INCREMENTAL_OVERWRITE 10
+#define TEST_FLAG_INCREMENTAL_OVERREAD  11
 #define N_MULTIPLE_FILES 		12
 #define TEST_FILE_NAME_LEN_MAX		27
 #define TEST_ITR_MAX 			10000
@@ -93,27 +99,36 @@
 double time_taken_append;
 double time_taken_without_append;
 int fd_multiple[N_MULTIPLE_FILES];
-char rw_buf_s[BUFFER_SIZE_S + 1];
 char buffer[N_MULTIPLE_FILES][TEST_FILE_NAME_LEN_MAX];
+char rw_buf_1kb[1024+1];
+char rw_buf_2kb[2048+1];
+char rw_buf_8kb[8*1024];
+char rw_buf_s1800b[1800];
+char rw_buf_s1[5*1024*1];
+char rw_buf_s2[5*1024*2];
+char rw_buf_s3[5*1024*3];
+int BUFFER_SIZE_S[5];
+unsigned long time_write_inc_ove[10];
+unsigned long time_read_inc_ove[10];
 
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
 
-int init_sample(void)
+int init_sample(int buffer_length)
 {
 	int fd;
 	int ret;
 	int i;
 	char sample_buf[] = "Writing data to the sample file\n";
-
+        
 	fd = open(SAMPLE_FILE, O_WRONLY | O_CREAT);
 	if (fd < 0) {
 		printf("Unable to open sample file: %s, fd = %d\n", SAMPLE_FILE, fd);
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < 200; i++) {
+	for (i = 0; i < (buffer_length/32)+1; i++) {
 		ret = write(fd, sample_buf, 32);
 		if (ret != 32) {
 			printf("Unable to write to sample file, fd = %d\n", ret);
@@ -125,7 +140,7 @@ int init_sample(void)
 	return OK;
 }
 
-void output(int flag, unsigned long time, int itr)
+static void output(int flag, unsigned long time, int itr)
 {
 	printf("====================================================================================================\n");
 	switch (flag) {
@@ -165,6 +180,14 @@ void output(int flag, unsigned long time, int itr)
                 printf("Time taken for reading %d times from multiple files from the start is %lu.%06lu s\n", itr, (time)/1000000, (time)%1000000);
                 break;
 
+	case TEST_FLAG_INCREMENTAL_OVERWRITE :
+                printf("Time taken for over writing %d times to single file incrementally at their start is %lu.%06lu s\n", itr, (time)/1000000, (time)%1000000);
+                break;
+
+        case TEST_FLAG_INCREMENTAL_OVERREAD :
+               printf("Time taken for over reading %d times to single file incrementally from their start is %lu.%06lu s\n", itr, (time)/1000000, (time)%1000000);
+                break;
+
 	default:
 		break;
 	}
@@ -172,28 +195,63 @@ void output(int flag, unsigned long time, int itr)
 	return;
 }
 
-static int do_test(int fd, int opn)
+static int perform_write(int fd, int size_type) {
+        int ret ;
+        if(size_type == 0)
+            ret= write(fd, rw_buf_s1800b, BUFFER_SIZE_S[size_type]);
+        else if(size_type == 1)
+            ret= write(fd, rw_buf_s1, BUFFER_SIZE_S[size_type]);
+        else if(size_type == 2)
+            ret= write(fd, rw_buf_s2, BUFFER_SIZE_S[size_type]);
+        else if(size_type == 3)
+            ret= write(fd, rw_buf_s3, BUFFER_SIZE_S[size_type]);
+        return ret;
+}
+
+static int perform_read(int fd, int size_type) {
+        int ret ;
+
+        if(size_type == 0)
+            ret= read(fd, rw_buf_s1800b,  BUFFER_SIZE_S[size_type]);
+        else if(size_type == 1)
+            ret= read(fd, rw_buf_s1,  BUFFER_SIZE_S[size_type]);
+        else if(size_type == 2)
+            ret= read(fd, rw_buf_s2,  BUFFER_SIZE_S[size_type]);
+        else if(size_type == 3)
+            ret= read(fd, rw_buf_s3,  BUFFER_SIZE_S[size_type]);
+
+        return ret;
+}
+
+static int do_test(int fd, int opn, int size_type)
 {
+	int totalSize = 3*1024*1024 ; //to be written 3 mb in total
 	int ret = OK;
 	int i;
 	int j;
+	int res2;
 	struct timeval wr_time_start;
 	struct timeval wr_time_stop;
-	unsigned long tt;
+	unsigned long tt= 0;
+        double t;
 
 	switch (opn) {
 	case TEST_FLAG_SINGLE_WRITE_APP:
+		printf("\n\n\n**********SINGLE_WRITE_APP** %d Bytes *************\n\n\n", BUFFER_SIZE_S[size_type]);
 		gettimeofday(&wr_time_start, NULL);
-		for (i = 0; i < 450; i++) {
-			ret = write(fd, rw_buf_s, BUFFER_SIZE_S);
-			if (ret != BUFFER_SIZE_S) { 
+		for (i = 0; i < (totalSize / BUFFER_SIZE_S[size_type]) - 1; i++) {
+			//ret = write(fd, rw_buf_s, BUFFER_SIZE_S);
+			//if (i % 10 == 0)
+			//	printf("%d \n",i);
+			ret = perform_write(fd, size_type);
+			if (ret != BUFFER_SIZE_S[size_type]) { 
 				printf("Unable to write to test file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
 				return -1;
 			}
 		}
 		gettimeofday(&wr_time_stop, NULL);
 		tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-		output(TEST_FLAG_SINGLE_WRITE_APP, tt, 450);
+		output(TEST_FLAG_SINGLE_WRITE_APP, tt, (totalSize / BUFFER_SIZE_S[size_type])-1);
 
 		ret = lseek(fd, 0, SEEK_SET);
 		if (ret < 0) {
@@ -202,29 +260,36 @@ static int do_test(int fd, int opn)
 		}
 
 		gettimeofday(&wr_time_start, NULL);
-                for (i = 0; i < 450; i++) {
-                        ret = read(fd, rw_buf_s, BUFFER_SIZE_S);
-                        if (ret != BUFFER_SIZE_S) {
+                for (i = 0; i < (totalSize / BUFFER_SIZE_S[size_type])-1; i++) {
+                        //ret = read(fd, rw_buf_s, BUFFER_SIZE_S);
+			ret = perform_read(fd, size_type);
+                        if (ret != BUFFER_SIZE_S[size_type]) {
                                printf("Unable to read to from file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
                                 return -1;
                         }
                 }
                 gettimeofday(&wr_time_stop, NULL);
                 tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-                output(TEST_FLAG_SINGLE_READ_SEQ, tt, 450);
+                output(TEST_FLAG_SINGLE_READ_SEQ, tt, (totalSize / BUFFER_SIZE_S[size_type])-1);
 		break;
 
 	case TEST_FLAG_SINGLE_WRITE_OVE:
-		gettimeofday(&wr_time_start, NULL);
-        	for(i = 0; i < 450; i++) {
+		 printf("\n\n\n**********SINGLE_WRITE_OVE** %d  Bytes*************\n\n\n",BUFFER_SIZE_S[size_type]);
+		 gettimeofday(&wr_time_start, NULL);
+        	 for(i = 0; i < (totalSize / BUFFER_SIZE_S[size_type]) - 1; i++) {
                 	fd = open(SINGLE_TEST_FILE, O_RDWR | O_CREAT | O_TRUNC);
                 	if (fd < 0) {
                         	printf("Unable to do test perfomance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
                         	return -1;
                 	}
-
-                	ret = write(fd, rw_buf_s, BUFFER_SIZE_S);
-                	if (ret != BUFFER_SIZE_S) {
+                        
+			//if (i % 10 == 0)
+                        //        printf("%d \n",i);
+                	//if (i == 1200)
+			//       sleep(100);	
+			//ret = write(fd, rw_buf_s, BUFFER_SIZE_S);
+                	ret = perform_write(fd, size_type);
+			if (ret != BUFFER_SIZE_S[size_type]) {
                         	printf("Unable to do test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
                         	return -1;
                 	}
@@ -232,18 +297,19 @@ static int do_test(int fd, int opn)
         	}
         	gettimeofday(&wr_time_stop, NULL);
         	tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-        	output(TEST_FLAG_SINGLE_WRITE_OVE, tt, 450);
+        	output(TEST_FLAG_SINGLE_WRITE_OVE, tt, (totalSize / BUFFER_SIZE_S[size_type])-1);
 		
 		gettimeofday(&wr_time_start, NULL);
-                for(i = 0; i < 450; i++) {
+                for(i = 0; i < (totalSize / BUFFER_SIZE_S[size_type]) - 1; i++) {
                         fd = open(SINGLE_TEST_FILE, O_RDONLY);
                         if(fd < 0) {
                                 printf("Unable to do test perfomance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
                                 return -1;
                         }
 
-                        ret = read(fd, rw_buf_s, BUFFER_SIZE_S);
-                        if (ret != BUFFER_SIZE_S) {
+                       // ret = read(fd, rw_buf_s, BUFFER_SIZE_S);
+                        ret = perform_read(fd, size_type);
+                        if (ret != BUFFER_SIZE_S[size_type]) {
                                 printf("Unable to do read test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
                                 return -1;
                         }
@@ -251,7 +317,7 @@ static int do_test(int fd, int opn)
                 }
                 gettimeofday(&wr_time_stop, NULL);
                 tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-                output(TEST_FLAG_SINGLE_READ_OVE, tt, 450);
+                output(TEST_FLAG_SINGLE_READ_OVE, tt, (totalSize / BUFFER_SIZE_S[size_type]) - 1);
 
 		ret = unlink(SINGLE_TEST_FILE);
 		if (ret < 0) {
@@ -261,11 +327,15 @@ static int do_test(int fd, int opn)
 		break;
 
 	case TEST_FLAG_MULTIPLE_WRITE_APP:
+		 printf("\n\n\n**********MULTIPLE_WRITE_APP******%d Bytes*********\n\n\n", BUFFER_SIZE_S[size_type]);
 		gettimeofday(&wr_time_start, NULL);
-		for(i = 0; i < 37; i++) {
-			for(j = 0; j < 12; j++) {
-				ret = write(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
-                        	if (ret < 0) {
+		for(i = 0; i < (totalSize / (BUFFER_SIZE_S[size_type]*4)) - 1; i++) {
+			for(j = 0; j < 4; j++) {
+				//ret = write(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
+                        	//if (i % 10 == 0)
+                                //	printf("%d \n",i);
+				ret = perform_write(fd_multiple[j], size_type);
+				if (ret < 0) {
                                 	printf("Unable to write to test file: %s, ret = ", buffer[j], ret);
                                 	return -1;
                        		}
@@ -273,9 +343,9 @@ static int do_test(int fd, int opn)
 		}
 		gettimeofday(&wr_time_stop, NULL);
 		tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-		output(TEST_FLAG_MULTIPLE_WRITE_APP, tt, 37);
+		output(TEST_FLAG_MULTIPLE_WRITE_APP, tt, (totalSize / (BUFFER_SIZE_S[size_type]*4)) - 1);
 
-		for (i = 0; i < 12; i++) {
+		for (i = 0; i < 4; i++) {
 			ret = lseek(fd_multiple[i], 0, SEEK_SET);
 			if (ret < 0) {
 				printf("Unable to move file pointer for file %d to start, ret = %d, errno = %d\n", i+1, ret, errno);
@@ -284,10 +354,11 @@ static int do_test(int fd, int opn)
 		}
 
 		gettimeofday(&wr_time_start, NULL);
-		for(i = 0; i < 37; i++) {
-                        for(j = 0; j < 12; j++) {
-                                ret = read(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
-                                if (ret != BUFFER_SIZE_S) {
+		for(i = 0; i < (totalSize / (BUFFER_SIZE_S[size_type]*4)) - 1; i++) {
+                        for(j = 0; j < 4; j++) {
+                                //ret = read(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
+                                ret = perform_read(fd_multiple[j], size_type);
+				if (ret != BUFFER_SIZE_S[size_type]) {
                                         printf("Unable to read from test file: %s, ret = ", buffer[j], ret);
                                         return -1;
                                 }
@@ -295,20 +366,24 @@ static int do_test(int fd, int opn)
                 }
                 gettimeofday(&wr_time_stop, NULL);
                 tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-                output(TEST_FLAG_MULTIPLE_READ_SEQ, tt, 37);
+                output(TEST_FLAG_MULTIPLE_READ_SEQ, tt, (totalSize / (BUFFER_SIZE_S[size_type]*4))-1);
 		break;
 
 	case TEST_FLAG_MULTIPLE_WRITE_OVE:
+		printf("\n\n\n**********MULTIPLE_WRITE_OVE***** %d Bytes**********\n\n\n",BUFFER_SIZE_S[size_type]);
                 gettimeofday(&wr_time_start, NULL);
-                for (i = 0; i < 37; i++) {
-                	for (j = 0; j < 12; j++) {
-                		fd_multiple[j] = open(buffer[j], O_RDWR | O_CREAT | O_TRUNC);
+                for (i = 0; i < (totalSize / (BUFFER_SIZE_S[size_type]*4)) - 1; i++) {
+                	for (j = 0; j < 4; j++) {
+                		//if (i % 10 == 0)
+                                //	printf("%d \n",i);
+				fd_multiple[j] = open(buffer[j], O_RDWR | O_CREAT | O_TRUNC);
                 		if (fd_multiple[j] < 0) {
                         		printf("Unable to open file = %s for testing, fd = %d\n", buffer[j], fd_multiple[j]);
                         		return -1;
                 		}
-                		ret = write(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
-	                        if (ret < 0) {
+                		//ret = write(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
+	                        ret = perform_write(fd_multiple[j], size_type);
+				if (ret < 0) {
 	                                printf("Unable to do test performance on file: %s, ret = %d\n", MULTI_TEST_FILE, ret);
 	                                return -1;
 	                        }
@@ -317,18 +392,19 @@ static int do_test(int fd, int opn)
 	         }
                 gettimeofday(&wr_time_stop, NULL);
                 tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-                output(TEST_FLAG_MULTIPLE_WRITE_OVE, tt, 37);
+                output(TEST_FLAG_MULTIPLE_WRITE_OVE, tt, (totalSize / (BUFFER_SIZE_S[size_type]*4)) - 1);
                 
 		gettimeofday(&wr_time_start, NULL);
-                for (i = 0; i < 37; i++) {
-                        for (j = 0; j < 12; j++) {
+                for (i = 0; i < (totalSize / (BUFFER_SIZE_S[size_type]*4))-1; i++) {
+                        for (j = 0; j < 4; j++) {
                                 fd_multiple[j] = open(buffer[j], O_RDONLY);
                                 if (fd_multiple[j] < 0) {
                                         printf("Unable to open file = %s for testing, fd = %d\n", buffer[j], fd_multiple[j]);
                                         return -1;
                                 }
-                                ret = read(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
-                                if (ret != BUFFER_SIZE_S) {
+                                //ret = read(fd_multiple[j], rw_buf_s, BUFFER_SIZE_S);
+                                ret = perform_read(fd_multiple[j],size_type);
+				if (ret != BUFFER_SIZE_S[size_type]) {
                                         printf("Unable to do read test performance on file: %s, ret = %d\n", MULTI_TEST_FILE, ret);
                                         return -1;
                                 }
@@ -337,9 +413,9 @@ static int do_test(int fd, int opn)
                 }
                 gettimeofday(&wr_time_stop, NULL);
                 tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
-                output(TEST_FLAG_MULTIPLE_READ_OVE, tt, 37);
+                output(TEST_FLAG_MULTIPLE_READ_OVE, tt, (totalSize / (BUFFER_SIZE_S[size_type]*4)) - 1);
 
-		for (i = 0; i < 12; i++) {
+		for (i = 0; i < 4; i++) {
 			ret = unlink(buffer[i]);
 			if (ret < 0) {
 				printf("Unable to delet file: %s, ret = %d\n", buffer[i], ret);
@@ -349,17 +425,21 @@ static int do_test(int fd, int opn)
 		break;
 
 	case TEST_FLAG_SINGLE_WRITE_MIX:
+		printf("\n\n\n**********SINGLE_WRITE_MIX***************\n\n\n");
                 gettimeofday(&wr_time_start, NULL);
                 for(i = 0; i < 56; i++) {
                         fd = open(SINGLE_TEST_FILE, O_WRONLY | O_CREAT);
                         if(fd < 0) {
-                                printf("Unable to do test perfomance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
+				printf("Unable to do test perfomance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
                                 return -1;
                         }
+			//if (i % 10 == 0)
+                        //        printf("%d \n",i);
 			
 			for (j = 0; j < 8; j++) {				
-                        	ret = write(fd, rw_buf_s, BUFFER_SIZE_S);
-				if (ret != BUFFER_SIZE_S) {
+                        	//ret = write(fd, rw_buf_s, BUFFER_SIZE_S);
+				ret = perform_write(fd, size_type);
+				if (ret != BUFFER_SIZE_S[size_type]) {
                          		printf("Unable to do test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
                                 	return -1;
                         	}
@@ -372,6 +452,83 @@ static int do_test(int fd, int opn)
                 tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
                 output(TEST_FLAG_SINGLE_WRITE_MIX, tt, 56);
                 break;
+	
+	 case TEST_FLAG_INCREMENTAL_OVERWRITE:
+                
+		printf("\n\n\n**********SINGLE_INCREMENTAL WRITE 2kb TizenRT 01, %d **************\n",size_type);
+		for(j = 0; j < 5; j++) { 
+                	fd_multiple[j] = open(buffer[j], O_RDWR | O_TRUNC);
+			if (!fd_multiple[j]) {
+                        	printf("Unable to do test perfomance on file: %s,at ret = %d\n", buffer[j], fd_multiple[j]);
+                        	return -1;
+			}
+		}	
+                
+                gettimeofday(&wr_time_start, NULL);
+		
+		for(j = 0; j < 5; j++) {  
+			for(i = 0; i < (32*size_type); i++) {       
+				//ret = write(fd_multiple[j], rw_buf_1kb,1*1024);
+                        	ret = write(fd_multiple[j], rw_buf_2kb, 2*1024);
+                        	if (ret < 0 ) {
+                                	printf("Unable to do test performance on file: %s,iter= %d ,ret = %d\n", buffer[j], i, ret);
+                                	return -1;
+                        	}
+                	}
+			close(fd_multiple[j]);
+		}
+		printf("ret = %d byte written\n",ret);
+              
+                gettimeofday(&wr_time_stop, NULL);
+                tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);
+                time_write_inc_ove[size_type] += tt;
+		//output(TEST_FLAG_INCREMENTAL_OVERWRITE, tt, 32*size_type);
+		
+		// calculating the size of the file
+                fd = open(buffer[0], O_RDONLY);
+                if (!fd) {
+                        printf("Unable to do test perfomance to calucalte size on file: %s,at ret = %d\n", SINGLE_TEST_FILE2, ret);
+                        return -1;
+                }
+                res2 = lseek(fd, 0L, SEEK_END);
+                if (ret < 0) {
+                        printf("Unable to move file pointer to start\n");
+                        return -1;
+                }
+		printf("2. size of file (%s) is %d bytes\n", buffer[0], res2);
+		close(fd);
+                
+		// incremental read
+		for(j = 0; j < 5; j++) {
+			fd_multiple[j] = open(buffer[j], O_RDONLY);
+                	if (!fd_multiple[j]) {
+                        	printf("Unable to do test perfomance on file: %s,at ret = %d\n", buffer[j], fd_multiple[j]);
+                        	return -1;
+                	}
+		}
+
+                gettimeofday(&wr_time_start, NULL);
+
+                for(j = 0; j < 5; j++) {
+			for(i = 0; i < (32* size_type); i++) {
+				//ret = read(fd_multiple[j], rw_buf_1kb,1*1024);
+                        	ret = read(fd_multiple[j], rw_buf_2kb, 2*1024);
+                        	if (ret < 0 ) {
+                                	printf("Unable to do test performance on file: %s, ret = %d\n", buffer[j], ret);
+                                	return -1;
+                        	}
+                	}
+			close(fd_multiple[j]);
+		}
+		
+                printf("ret = %d byte read\n",ret);
+
+                gettimeofday(&wr_time_stop, NULL);
+                tt = (wr_time_stop.tv_sec - wr_time_start.tv_sec)*1000000 + (wr_time_stop.tv_usec - wr_time_start.tv_usec);           
+		time_read_inc_ove[size_type] += tt;
+		//output(TEST_FLAG_INCREMENTAL_OVERREAD, tt, 32*size_type);
+
+		break;
 
 	default:
 		break;
@@ -379,22 +536,115 @@ static int do_test(int fd, int opn)
 	return ret;
 }
 
-static int init(void)
+static int init(int size_type)
 {
 	int ret;
 	int fd_sample = 0;
 	int i;
 
-	memset(rw_buf_s, 0, BUFFER_SIZE_S + 1);
+	//memset(rw_buf_s, 0, BUFFER_SIZE_S + 1);
+	for (i = 0; i < 10; i++) {
+		time_write_inc_ove[i] = 0;
+		time_read_inc_ove[i] = 0;
+	}
 
         //Initializing sample file
-        ret = init_sample();
-        if(ret < 0) {
+        ret = init_sample(BUFFER_SIZE_S[size_type]);
+        if (ret < 0) {
                 printf("Unable to initalize the sample file: %s, ret = %d\n", SAMPLE_FILE, ret);
                 return ret;
         }
 
-	ret = mkdir(SINGLE_TEST_FILE_DIR, 0777);
+	fd_sample = open(SAMPLE_FILE, O_RDONLY);
+        if (fd_sample < 0) {
+                printf("Unable to open sample file for reading, ret = %d\n", ret);
+                return ret;
+        }
+
+        printf("Populating in buffer started ");
+      
+        /*memset(rw_buf_8kb,0,(8*1024) + 1);
+        ret = read(fd_sample, rw_buf_8kb, 8*1024);
+        if (ret < 0) {
+                printf("Unable to read file into 1kb buffer\n");
+                return -1;
+        }
+        
+	printf(" buffer content - \n %s \n", rw_buf_8kb);
+	
+	ret = lseek(fd_sample, 0, SEEK_SET);
+        if (ret < 0) {
+               printf("Unable to move file pointer to start\n");
+               return -1;
+        }*/
+
+	memset(rw_buf_1kb, 0, 1024 + 1);
+        ret = read(fd_sample, rw_buf_1kb,1024);
+        if (ret < 0) {
+        	printf("Unable to read file into 1kb buffer\n");
+                return -1;
+        }
+
+	printf("bytes written in 1kb buffer = %d bytes\n",ret);
+            
+        ret = lseek(fd_sample, 0, SEEK_SET);
+        if (ret < 0) {
+               printf("Unable to move file pointer to start\n");
+               return -1;
+        }
+	
+	printf(" buffer content - \n %s \n", rw_buf_1kb);
+        memset(rw_buf_2kb,0,(2*1024) + 1);
+        ret = read(fd_sample, rw_buf_2kb, 2048);
+        if (ret < 0) {
+               printf("Unable to read file into 2kb\n");
+               return -1;
+        }
+
+	printf("in buffer written = %d bytes\n", ret);
+        printf(" buffer content - \n %s \n", rw_buf_2kb);
+           
+
+	if (size_type == 0) {
+            memset(rw_buf_s1800b, 0, BUFFER_SIZE_S[size_type] + 1);
+            printf(" at buffer = %d \n", size_type);
+            ret = read(fd_sample, rw_buf_s1800b, BUFFER_SIZE_S[size_type]);
+        }
+        else if (size_type == 1) {
+            memset(rw_buf_s1, 0, BUFFER_SIZE_S[size_type] + 1);
+            printf(" at buffer = %d \n", size_type);
+            ret = read(fd_sample, rw_buf_s1, BUFFER_SIZE_S[size_type]);
+        }
+        else if (size_type == 2) {
+            memset(rw_buf_s2, 0, BUFFER_SIZE_S[size_type] + 1);
+            printf(" at buffer = %d \n", size_type);
+            ret = read(fd_sample, rw_buf_s2, BUFFER_SIZE_S[size_type]);
+        }
+        else if (size_type == 3) {
+            memset(rw_buf_s3, 0, BUFFER_SIZE_S[size_type] + 1);
+            printf(" at buffer = %d \n", size_type);
+            ret = read(fd_sample, rw_buf_s3,  BUFFER_SIZE_S[size_type]);
+        }
+	close(fd_sample);
+
+	for (i = 0; i < 5; i++) {
+		snprintf(buffer[i], 27, "%s%d", MULTI_TEST_FILE, i);
+	}
+
+	return OK;
+}
+
+static void initalizeBuffer() {
+    int i;
+    BUFFER_SIZE_S[0] = 1800;
+    for(i = 1; i <= 3; i++) {
+        BUFFER_SIZE_S[i]= 5*1024*i;
+    }
+}
+
+static int createDirectory() {
+        int ret;
+        ret = mkdir(SINGLE_TEST_FILE_DIR, 0777);
         if (ret < 0) {
                 printf("Unable to create directory for single file testing, ret = %d\n", ret);
                 return -1;
@@ -405,26 +655,10 @@ static int init(void)
                 printf("Unable to create directory for multiple file testing, ret = %d\n", ret);
                 return -1;
         }
-
-        //Populating buffers of two sizes for testing
-        fd_sample = open(SAMPLE_FILE, O_RDONLY);
-        if (fd_sample < 0) {
-                printf("Unable to open sample file for reading, ret = %d\n", ret);
-                return ret;
-        }
-
-        ret = read(fd_sample, rw_buf_s, BUFFER_SIZE_S);
-        if (ret != BUFFER_SIZE_S) {
-                printf("Unable to read from sample file, ret = %d\n", ret);
-                return ret;
-        }
-	close(fd_sample);
-
-	for (i = 0; i < 12; i++) {
-		snprintf(buffer[i], 27, "%s%d", MULTI_TEST_FILE, i);
-	}
-
-	return OK;
+        // calculating the buffer sizes in multiple of 5kb
+        initalizeBuffer();
+        printf(" Directory created & buffer of different size initialized\n");
+        return 0;
 }
 
 #ifdef CONFIG_BUILD_KERNEL
@@ -433,128 +667,259 @@ int main(int argc, FAR char *argv[])
 int fs_performance_main(int argc, char *argv[])
 #endif
 {
-	if (argc < 2) {
+	/*if (argc < 2) {
 		printf("Invalid input, argc = %d\n", argc);
 		goto end;
-	}
+	}*/
 
-	int option = atoi(argv[1]);	//Which test case to be executed
+	int option = 6;// atoi(argv[1]);	//Which test case to be executed
 	int ret = 0;
-	int fd_single = 0;		//File Descriptor for single file in test environment
+	int fd_single = 0;		        //File Descriptor for single file in test environment
+	int fd_single2 = 0;                     //File Descriptor for incremental overwrite case
 	int i;
+	int j;
+	int res2;
+	int size_type;
+        int write_itr;
+	int outer_loop;
 
 	printf("\nChosen test option = %d\n\n", option);
 
-	printf("Initializing test files\n");
-	ret = init();
+	printf("11.initializing test files\n");
+	//ret = init();
+	createDirectory();
+        ret = init(1);
+	
 	if (ret < 0) {
 		printf("Failed to initialize test case parameters, ret = %d\n", ret);
 		goto errout;
 	}
 	printf("Initialization complete\n\n");
 
-	switch (option) {
-	case 1: goto SINGLE_APP;
+       switch (option) {
 
-	case 2: goto SINGLE_OVE;
+	case 1: goto START;//SINGLE_APP;
 
-	case 3: goto MULTIPLE_APP;
+	case 2: goto START;//SINGLE_OVE;
 
-	case 4: goto MULTIPLE_OVE;
+	case 3: goto START;//MULTIPLE_APP;
 
-	case 5: goto SINGLE_MIX;
+	case 4: goto START;//MULTIPLE_OVE;
+
+	case 5: goto START;//SINGLE_MIX;
+
+	case 6: goto INCREMENTAL_OVE;
 
 	default: break;
 	}
 
-SINGLE_APP:	
-	//Do test on single file for continuous writing
-	fd_single = open(SINGLE_TEST_FILE, O_RDWR | O_CREAT);
-	if (fd_single < 0) {
-		printf("Unable to open file for testing, fd = %d\n", fd_single);
-		return -1;
-	}
 
-	ret = do_test(fd_single, TEST_FLAG_SINGLE_WRITE_APP);
-	if (ret < 0) {
-		printf("Unable to test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
-		return -1;
-	}
+INCREMENTAL_OVE:
+           	// create 64kb file and overwrite and overread 1kb data 64 times...
+		// append 64kb data to the file and overwrite and overread 1kb data 128 times..
+		// do the above with 1kb and 2kb buffer size to write and read. 
+       for(outer_loop = 1; outer_loop <= 100; outer_loop++) {	
+       		
+	       printf("incremental overwrite started outer loop = %d \n",outer_loop);
+       		for( j = 0; j < 5; j++) {             
+			fd_multiple[j] = open(buffer[j], O_RDWR | O_CREAT );
+            		if (!fd_multiple[j] ) {
+                		printf("Unable to open file %s for testing, fd = %d\n", buffer[j], fd_multiple[j]);
+                		return -1;
+            		}
+            		close(fd_multiple[j]);
+		}
+            
+		for (size_type = 1; size_type <= 7; size_type++) {
+			printf("size: type :::: %d \n",size_type);
+			for (j = 0; j < 5; j++ ) {
+				fd_multiple[j] = open(buffer[j], O_RDWR | O_APPEND);
+                		if (!fd_multiple[j] ) {
+                    			printf("Unable to open file for testing, fd = %d\n", fd_single2);
+                    			return -1;
+                		}
+                
+                		for (write_itr = 0; write_itr < 64; write_itr++) {
+                    			ret  = write(fd_multiple[j], rw_buf_1kb, 1024);
+                    			if(ret < 0) {
+                        			printf("Unable to test performance on file: %s, ret = %d,write_itr = %d \n", buffer[j], ret,write_itr);
+                        			return -1;         
+                    			}           
+                		}
+			
+                		close(fd_multiple[j]);
+			}
+			// calculating the size of the file
+                	fd_single2 = open(buffer[3], O_RDONLY);
+                	if (!fd_single2) {
+                        	printf("Unable to calucalte size on file: %s,at ret = %d\n", buffer[3], ret);
+                        	return -1;
+                	}
+                	res2 =lseek(fd_single2, 0L, SEEK_END);
+                	if (ret < 0) {
+                        	printf("Unable to move file pointer to start\n");
+                        	return -1;
+                	}
+			close(fd_single2);
+                	printf(" 1.%s size = %d bytes", buffer[3], res2);
+			
+                	// do test
+                	ret = do_test(fd_single2, TEST_FLAG_INCREMENTAL_OVERWRITE,size_type);
+                
+			if (ret < 0) {
+                                printf("Unable to test performance (incremental overwrite), ret = %d\n", ret);
+                                return -1;
+                        }
 
-	close(fd_single);
-	unlink(SINGLE_TEST_FILE);
-	//goto end;
-
-SINGLE_OVE:
-	//Do test on single file for overwriting
-	ret = do_test(fd_single, TEST_FLAG_SINGLE_WRITE_OVE);
-	if (ret < 0) {
-                printf("Unable to test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
-                return -1;
-        }
-	//goto end;
-
-MULTIPLE_APP:
-	//Initilaize set of files for multiple file testing
-	for (i = 0; i < 12; i++) {
-        	fd_multiple[i] = open(buffer[i], O_RDWR | O_CREAT);
-        	if (fd_multiple[i] < 0) {
-                	printf("Unable to open file = !!!%s!!! for testing, fd = !!!%d!!!, errno = %d\n", buffer[i], fd_multiple[i], errno);
-                	ret = fd_multiple[i];
-			goto errout;
-        	}
-		close(fd_multiple[i]);
-	}
-
-
-	for (i = 0; i < 12; i++) {
-                fd_multiple[i] = open(buffer[i], O_RDWR);
-		if (fd_multiple[i] < 0) {
-			printf("Unable to retrieve fd for %dth file, fd = %d, errno = %d\n", (i + 1), fd_multiple[i], errno);
+                	// calculating the size of the file
+                	fd_single2 = open(buffer[3], O_RDONLY);
+                	if (!fd_single2) {
+                        	printf("Unable to calucalte size on file: %s,at ret = %d\n", buffer[3], ret);
+                        	return -1;
+                	}
+               		res2 = lseek(fd_single2, 0L, SEEK_END);
+                	close(fd_single2);
+                	//printf(" 2.%s size = %d bytes\n", buffer[3], res2);
+               
+			//if (size_type == 18)
+			//	goto errout;
+            	}
+		for (i = 0; i < 5; i++) {
+                	ret = unlink(buffer[i]);
+                        if (ret < 0) {
+                        	printf("Unable to remove file: %s, ret = %d\n", buffer[i], ret);
+                                goto end;
+                        }
+                 }
+		
+		printf("outer loop %d ends\n",outer_loop);
+		if (outer_loop == 100) {
+			for( i = 0 ; i <= 7; i++) {
+				printf("%d - > %lu us &  %lu us\n",i, time_write_inc_ove[i], time_read_inc_ove[i]);
+			}
 			goto errout;
 		}
-        }
+			
+	}
+		
+	return 0;
 
-	printf("Multiple file initialization complete\n");
-	sleep(3);
 
-        ret = do_test(0, TEST_FLAG_MULTIPLE_WRITE_APP);
-        if (ret < 0) {
-                printf("Unable to test performance on multiple files, ret = %d\n", ret);
-                return -1;
-        }
+START:
+        createDirectory();
+        for(size_type =0;size_type<=3;size_type++) {
+	printf("\n*****************######################*******************Buffersize = %d && size_type no = %d ******************#################*****************\n",BUFFER_SIZE_S[size_type],size_type);
+    	//creating a sample file and populating the buffer rw_buf_s_size_type with BUFFER_SIZE_S[size_type] kb;
+    	//rw_buf_s_1800b =1800 bytes
+    	// rw_buf_s_1 = 64kb data
+    	// rw_buf_s_2 = 2*64 = 128 kb data and son on ...
+    	ret = init(size_type);
+    
+   	 if (ret < 0) {
+         	printf("Failed to initialize test case parameters, ret = %d\n", ret);
+         	goto errout;
+    	}
+    
+    	printf("Initialization complete\n\n");
+
+    	for (int itr = 0; itr < 5; itr++) {
+        	printf("\n#################################Iteration = %d ########################################\n",itr);
+
+		SINGLE_APP:	
+			//Do test on single file for continuous writing
+			fd_single = open(SINGLE_TEST_FILE, O_RDWR | O_CREAT);
+			if (fd_single < 0) {
+				printf("Unable to open file for testing, fd = %d\n", fd_single);
+				return -1;
+			}
+
+			ret = do_test(fd_single, TEST_FLAG_SINGLE_WRITE_APP, size_type);
+			if (ret < 0) {
+				printf("Unable to test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
+				return -1;
+			}
+
+			close(fd_single);
+			unlink(SINGLE_TEST_FILE);
+			//goto end;
+
+		SINGLE_OVE:
+			//Do test on single file for overwriting
+			ret = do_test(fd_single, TEST_FLAG_SINGLE_WRITE_OVE, size_type);
+			if (ret < 0) {
+                		printf("Unable to test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
+                		return -1;
+        		}
+			printf("end single ove \n");
+			//goto end;
+
+		MULTIPLE_APP:
+			//Initilaize set of files for multiple file testing
+			printf("inside multi app \n");
+			for (i = 0; i < 4; i++) {
+        			fd_multiple[i] = open(buffer[i], O_RDWR | O_CREAT);
+        			if (fd_multiple[i] < 0) {
+                			printf("Unable to open file = !!!%s!!! for testing, fd = !!!%d!!!, errno = %d\n", buffer[i], fd_multiple[i], errno);
+                			ret = fd_multiple[i];
+					goto errout;
+        			}
+				close(fd_multiple[i]);
+			}
+
+
+			for (i = 0; i < 4; i++) {
+                		fd_multiple[i] = open(buffer[i], O_RDWR);
+				if (fd_multiple[i] < 0) {
+					printf("Unable to retrieve fd for %dth file, fd = %d, errno = %d\n", (i + 1), fd_multiple[i], errno);
+					goto errout;
+				}
+        		}
+
+			printf("Multiple file initialization complete\n");
+			sleep(3);
+
+        		ret = do_test(0, TEST_FLAG_MULTIPLE_WRITE_APP, size_type);
+        		if (ret < 0) {
+                		printf("Unable to test performance on multiple files, ret = %d\n", ret);
+                		return -1;
+        		}
 	
-	for (i = 0; i < 12; i++) {
-                close(fd_multiple[i]);
-		ret = unlink(buffer[i]);
-		if (ret < 0) {
-			printf("Unable to remove file: %s, ret = %d\n", buffer[i], ret);
-			goto end;
-		}
+			for (i = 0; i < 4; i++) {
+                		close(fd_multiple[i]);
+				ret = unlink(buffer[i]);
+				if (ret < 0) {
+					printf("Unable to remove file: %s, ret = %d\n", buffer[i], ret);
+					goto end;
+				}
+			}
+			//goto end;
+
+		MULTIPLE_OVE:
+			//Do test on mutliple file for overwriting
+        		ret = do_test(0, TEST_FLAG_MULTIPLE_WRITE_OVE, size_type);
+        		if (ret < 0) {
+                		printf("Unable to test performance on file: %s, ret = %d\n", MULTI_TEST_FILE, ret);
+                		return -1;
+        		}
+			//goto end;
+
+		SINGLE_MIX:
+			//Do test on single file for writing 7-8 times and delete it. Repeat k iteration
+			ret = do_test(0, TEST_FLAG_SINGLE_WRITE_MIX, size_type);
+			if (ret < 0) {
+				printf("Unable to test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
+				return -1;
+			}
+
+		end:
+			ret = OK;
+               printf("\n###################################################################################\n");
+
 	}
-	//goto end;
-
-MULTIPLE_OVE:
-	//Do test on mutliple file for overwriting
-        ret = do_test(0, TEST_FLAG_MULTIPLE_WRITE_OVE);
-        if (ret < 0) {
-                printf("Unable to test performance on file: %s, ret = %d\n", MULTI_TEST_FILE, ret);
-                return -1;
-        }
-	//goto end;
-
-SINGLE_MIX:
-	//Do test on single file for writing 7-8 times and delete it. Repeat k iteration
-	ret = do_test(0, TEST_FLAG_SINGLE_WRITE_MIX);
-	if (ret < 0) {
-		printf("Unable to test performance on file: %s, ret = %d\n", SINGLE_TEST_FILE, ret);
-		return -1;
 	}
 
-end:
-	ret = OK;
-errout:
-	printf("Filesystem Performance Test Example Exits\n");
+	errout:
+		printf("Filesystem Performance Test Example Exits\n");
 	return ret;
 }
 
