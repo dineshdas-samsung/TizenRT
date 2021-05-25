@@ -75,6 +75,7 @@ function get_executable_name()
 		km0_bl) echo "km0_boot_all.bin";;
 		km4_bl) echo "km4_boot_all.bin";;
 		kernel|ota) echo "km0_km4_image2.bin";;
+		bootparam) echo "bootparam.bin";;
 		userfs) echo "rtl8721csm_smartfs.bin";;
 		*) echo "No Binary Match"
 		exit 1
@@ -364,6 +365,10 @@ case $1 in
 		;;
 	erase|ERASE)
 		erase $1 $2
+		;;
+	kernel|KERNEL)
+		download_specific_partition $1
+		download_specific_partition "bootparam"
 		;;
 	*)
 		download_specific_partition $1
